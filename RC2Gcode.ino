@@ -174,24 +174,25 @@ void loop() {
     switch(t) {
       case 'w': break;
       case '+': { 
-        addGcode(String("G1 G90 F1500 X")+x+"Y"+y+"Z"+z);
+        addGCode(String("G1 G90 F1500 X")+x+"Y"+y+"Z"+z);
         break;
       }
       case 'g': {
         sendGCode("M3 S0");
-        addGcode("G4 P1"); 
-        addGcode("M3 S0"); 
-        addGcode("G4 P1"); 
+        addGCode("G4 P1"); 
+        addGCode("M3 S0"); 
+        addGCode("G4 P1"); 
         break;
       }
       case 'r': {
         sendGCode("M3 S500");
-        addGcode("G4 P1"); 
-        addGcode("M3 S500");
+        addGCode("G4 P1"); 
+        addGCode("M3 S500");
         break;
       }
       case 'x': wgcode=0; break;
       case 'l': {
+        USB<<"Listing gcode queue:\n";
         for(int i=0; i<wgcode; i++) USB<<gcodes[i]<<'\n'; 
         break;
       }
@@ -208,12 +209,12 @@ void loop() {
 
 void sendGCode(String c) {
   GRBL<<c<<'\n';
-  USB.print("TX:");USB.println(c);
+  USB<<"TX:"<<c<<'\n';
   lastSent = millis();
   canSend = false; // wait for confirmation
 }
 
-bool addGcode(String c) {
+bool addGCode(String c) {
   if(wgcode>=MAX_GCODES) {USB<<"Limit reached\n"; return false;}
   gcodes[wgcode]=c; 
   wgcode++; 
@@ -223,72 +224,72 @@ bool addGcode(String c) {
 bool startsWith(const char *str, const char *pre) {
     return strncmp(pre, str, strlen(pre)) == 0;
 }
-    void mystrcpy(char* dst, const char* start, const char* end) {
-        while(start!=end) {
-            *(dst++) = *(start++);
-        }
-        *dst=0;
+
+void mystrcpy(char* dst, const char* start, const char* end) {
+    while(start!=end) {
+        *(dst++) = *(start++);
     }
+    *dst=0;
+}
 
+void parseGrblStatus(char* v) {
+    //<Idle|MPos:9.800,0.000,0.000|FS:0,0|WCO:0.000,0.000,0.000>
+    //<Idle|MPos:9.800,0.000,0.000|FS:0,0|Ov:100,100,100>
+    //GD_DEBUGF("parsing %s\n", v.c_str() );
+    
+    char buf[10];
+    bool mpos;
+    char cpy[100];
+    strncpy(cpy, v, 100);
+    v=cpy;
 
-    void parseGrblStatus(char* v) {
-        //<Idle|MPos:9.800,0.000,0.000|FS:0,0|WCO:0.000,0.000,0.000>
-        //<Idle|MPos:9.800,0.000,0.000|FS:0,0|Ov:100,100,100>
-        //GD_DEBUGF("parsing %s\n", v.c_str() );
-        
-        char buf[10];
-        bool mpos;
-        char cpy[100];
-        strncpy(cpy, v, 100);
-        v=cpy;
+    // idle/jogging
+    char* pch = strtok(v, "|");
+    if(pch==nullptr) return;
+    status = pch; 
+    //GD_DEBUGF("Parsed Status: %s\n", status.c_str() );
+    USB<<"Parsed status:"<<status<<'\n';
 
-        // idle/jogging
-        char* pch = strtok(v, "|");
-        if(pch==nullptr) return;
-        status = pch; 
-        //GD_DEBUGF("Parsed Status: %s\n", status.c_str() );
-        USB<<"Parsed status:"<<status<<'\n';
+    // MPos:0.000,0.000,0.000
+    pch = strtok(nullptr, "|"); 
+    if(pch==nullptr) return;
+    
+    char *st, *fi;
+    st=pch+5;fi = strchr(st, ',');   mystrcpy(buf, st, fi);  x = atof(buf);
+    st=fi+1; fi = strchr(st, ',');   mystrcpy(buf, st, fi);  y = atof(buf);
+    st=fi+1;                                                 z = atof(st);
+    mpos = startsWith(pch, "MPos");
+    //GD_DEBUGF("Parsed Pos: %f %f %f\n", x,y,z);
+    USB<<"Parsed Pos:"<<x<<" "<<y<<" "<<z<<'\n';
 
-        // MPos:0.000,0.000,0.000
-        pch = strtok(nullptr, "|"); 
-        if(pch==nullptr) return;
-        
-        char *st, *fi;
-        st=pch+5;fi = strchr(st, ',');   mystrcpy(buf, st, fi);  x = atof(buf);
-        st=fi+1; fi = strchr(st, ',');   mystrcpy(buf, st, fi);  y = atof(buf);
-        st=fi+1;                                                 z = atof(st);
-        mpos = startsWith(pch, "MPos");
-        //GD_DEBUGF("Parsed Pos: %f %f %f\n", x,y,z);
-        USB<<"Parsed Pos:"<<x<<" "<<y<<" "<<z<<'\n';
-
-        // FS:500,8000 or F:500    
-        pch = strtok(nullptr, "|"); 
-        while(pch!=nullptr) {
-        
-            if( startsWith(pch, "FS:") || startsWith(pch, "F:")) {
-                /*
-                if(pch[1] == 'S') {
-                    st=pch+3; fi = strchr(st, ','); mystrcpy(buf, st, fi);  feed = atoi(buf);
-                    st=fi+1;  spindleVal = atoi(st);
-                } else {
-                    feed = atoi(pch+2);
-                }
-                */
-            } else 
-            if(startsWith(pch, "WCO:")) {
-                st=pch+4;fi = strchr(st, ',');   mystrcpy(buf, st, fi);  ofsX = atof(buf);
-                st=fi+1; fi = strchr(st, ',');   mystrcpy(buf, st, fi);  ofsY = atof(buf);
-                st=fi+1;                                                 ofsZ = atof(st);
-                //GD_DEBUGF("Parsed WCO: %f %f %f\n", ofsX, ofsY, ofsZ);
-                USB<<"Parsed WCO:"<<ofsX<<" "<<ofsY<<" "<<ofsZ<<'\n';
+    // FS:500,8000 or F:500    
+    pch = strtok(nullptr, "|"); 
+    while(pch!=nullptr) {
+    
+        if( startsWith(pch, "FS:") || startsWith(pch, "F:")) {
+            /*
+            if(pch[1] == 'S') {
+                st=pch+3; fi = strchr(st, ','); mystrcpy(buf, st, fi);  feed = atoi(buf);
+                st=fi+1;  spindleVal = atoi(st);
+            } else {
+                feed = atoi(pch+2);
             }
-
-            pch = strtok(nullptr, "|"); 
-
+            */
+        } else 
+        if(startsWith(pch, "WCO:")) {
+            st=pch+4;fi = strchr(st, ',');   mystrcpy(buf, st, fi);  ofsX = atof(buf);
+            st=fi+1; fi = strchr(st, ',');   mystrcpy(buf, st, fi);  ofsY = atof(buf);
+            st=fi+1;                                                 ofsZ = atof(st);
+            //GD_DEBUGF("Parsed WCO: %f %f %f\n", ofsX, ofsY, ofsZ);
+            USB<<"Parsed WCO:"<<ofsX<<" "<<ofsY<<" "<<ofsZ<<'\n';
         }
-        
-        if(!mpos) {
-            x -= ofsX; y -= ofsY; z -= ofsZ;
-        }
+
+        pch = strtok(nullptr, "|"); 
 
     }
+    
+    if(!mpos) {
+        x -= ofsX; y -= ofsY; z -= ofsZ;
+    }
+
+}
