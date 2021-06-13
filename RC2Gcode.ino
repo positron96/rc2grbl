@@ -1,14 +1,15 @@
+#include <PsxControllerHwSpi.h>
+
 #define USB Serial
 #define GRBL Serial1
 
 template<class T> inline Print &operator <<(Print &obj, T arg) { obj.print(arg); return obj; }
+template<class T> inline Print &operator <<=(Print &obj, T arg) { obj.println(arg); return obj; }
 
 constexpr int N_AXES = 3;
 
-int pins[N_AXES] = { 2,3,4 };
-
-volatile uint32_t lengths[N_AXES];
-volatile uint32_t startTimes[N_AXES];
+const byte PIN_PS2_ATT = 10;
+PsxControllerHwSpi<PIN_PS2_ATT> psx;
 
 float ofsX, ofsY, ofsZ, x,y,z;
 String status;
@@ -18,47 +19,39 @@ String gcodes[MAX_GCODES];
 int wgcode=0;
 int rgcode=0;
 bool playMode=false;
+bool playCycle=false;
 
 bool startsWith(const char *str, const char *pre);
 
-ISR (PCINT0_vect) {
-  uint8_t newv = ( PINB & 0b01110000 )>>4;
-  
-  uint32_t t = micros();
-  static uint8_t oldv;
-  uint8_t changed = newv ^ oldv;
-  oldv = newv;
-  
-  for(uint8_t i=0; i<N_AXES; i++) {
-    if( changed & (1<<i) ) {  // pin i changed
-      if( newv & (1<<i) ) { // rising
-        startTimes[i] = t;
-      } else { // falling
-        lengths[i] = t-startTimes[i];
-      }
-    }
+void hang(){
+  while(1){
+    pinMode(LED_BUILTIN_TX,INPUT); delay(250);
+    pinMode(LED_BUILTIN_TX,OUTPUT);delay(250);
   }
 }
 
-
 void setup() {
-  USB.begin(115200);  // usb
-  while (!USB) {}
+  USB.begin(115200); 
+  //while (!USB) {}
   USB.println("; test!");
 
   GRBL.begin(115200); // hw  
 
-  // https://sites.google.com/site/qeewiki/books/avr-guide/external-interrupts-on-the-atmega328
-  cli();
-  PCICR |= (1 << PCIE0); // enable PCMSK0
-  PCMSK0 = (1<<PCINT4) | (1<<PCINT5) | (1<<PCINT6); // D8, D9, D10
-  sei();
-  delay(25);
-
+  delay(100);
+  
+  if(!psx.begin() ) { USB<<="No controller"; hang(); }
+  if(!psx.enterConfigMode() ) { USB<<="enterConfigMode failed"; hang(); }  
+  PsxControllerType ctype = psx.getControllerType();
+  USB<<"Type: "<<int(ctype)<<'\n';
+  if (!psx.enableAnalogSticks ()) { USB<<="Cannot enable analog sticks"; }
+  if (!psx.enableAnalogButtons ()) { USB<<="Cannot enable analog buttons"; }
+  psx.exitConfigMode();  
+  delay(300);  
+  USB.println("Controller ready!");
+  
+  
 }
 
-constexpr int CENTER = 1500;
-constexpr int DEADZONE = 50;
 
 constexpr int MAX_FEEDRATE = 4000; // mm/min, divide by 60 to get mm/s
 constexpr int INTL_MS = 15;
@@ -70,29 +63,75 @@ void loop() {
 
   bool move = false;
   float vals[N_AXES];
-  uint32_t t0 = micros();
-  for(int i=0; i<N_AXES; i++) {
-    int t = lengths[i];
-    int32_t d = t0-startTimes[i];
-    if(d > 50000L) { t = CENTER; }
-    
-    //USB.print(lengths[i]);
-    //USB.print(',');
-    
-    t -= CENTER;
-    if(t>DEADZONE) { t-=DEADZONE; } 
-    else if(t<-DEADZONE) { t+=DEADZONE; }
-    else {t=0;} 
-    float v = (float)t/(1000.0-DEADZONE*2)*2;    // -1..1
-    if(v!=0) move=true;
-    vals[i] = v;
 
-    //USB.print(v);
-    //USB.print(',');
+  static PsxButtons lastBtns=0;
+  static uint32_t lastPsx;
+  if(millis()-lastPsx>50) {
+    lastPsx = millis();
+    if(psx.read() ) {
+  
+      PsxButtons btns = psx.getButtonWord(), t; t=btns;
+      btns = (btns ^ lastBtns) & btns;
+      lastBtns = t;
+     
+      if(btns & PSB_CROSS) { 
+        addGCode(String("G1 G90 F2000 X")+x+"Y"+y+"Z"+z); 
+        USB<<="Added command";
+      }
+      if(btns & PSB_START) { rgcode=0; playMode=true; }
+      if(btns & PSB_SELECT) { 
+          USB<<="=== Listing:"; for(int i=0; i<wgcode; i++) USB<<=gcodes[i];
+          USB<<="===";
+      }
+      if(btns & PSB_SQUARE) { 
+          USB<<="Cleared program";
+          wgcode=0; 
+      }
+      if(btns & PSB_TRIANGLE) { sendGCode("$H");  }
+      if(btns & PSB_L1) {
+          GRBL.print('\x84');//door
+          playMode = false;
+          USB.println("TX:[door]"); 
+      }
+      if(btns & PSB_R1) {
+          GRBL.print('~');
+          USB.println("TX:[continue]"); 
+      }
+      if(btns & PSB_R2) { 
+          sendGCode("M3 S0");
+          addGCode("G4 P1"); 
+          addGCode("M3 S0"); 
+          addGCode("G4 P1");     
+      }
+      if(btns & PSB_L2) { 
+          sendGCode("M3 S500");
+          addGCode("G4 P1"); 
+          addGCode("M3 S500");
+      }
+      if(btns & PSB_PAD_UP)   { playCycle=true;   }
+      if(btns & PSB_PAD_DOWN) { playCycle=false;  }
+      
+      byte lx, ly;
+      psx.getLeftAnalog(lx, ly);
+      byte rx, ry;
+      psx.getRightAnalog(rx, ry);
+      
+      vals[0] = (rx-128)/128.0;
+      vals[1] = (ry-128)/128.0;
+      vals[2] = -(lx-128)/128.0;
+  
+    } else { 
+      USB<<="psx read error";
+    }
   }
-  //USB.println();
+  for(int i=0; i<N_AXES; i++) {
+    if(vals[i]!=0) move=true;
+  }
 
-  if(move) playMode=false;
+  if(move && playMode) {
+    USB<<="Aborting playback";
+    playMode=false;
+  }
   
   static bool stopped = false;
 
@@ -123,7 +162,7 @@ void loop() {
     } else {
       if(!stopped) {
         GRBL.print('\x85');
-        USB.println("TX:!");
+        USB.println("TX:[cancel-jog]");
         stopped = true;
         lastStatusReq = millis()+200;
         requestStatus = true;
@@ -132,10 +171,12 @@ void loop() {
     }
   } else {
     if(canSend && rgcode<wgcode) {
-      USB<<"Replaying "<<gcodes[rgcode]<<'\n';
+      USB<<"Replaying \""<<gcodes[rgcode]<<='"';
       sendGCode(gcodes[rgcode]);
       rgcode++;
-      if(rgcode==wgcode) {playMode=false;}
+      if(rgcode==wgcode) { 
+        if(!playCycle) {playMode=false;} else {sendGCode("G4 P0");rgcode=0;} 
+      }
     }
   }
 
@@ -169,6 +210,7 @@ void loop() {
     }
   }
 
+/*
   while(USB.available()>0) { 
     int t = USB.read();
     switch(t) {
@@ -205,6 +247,8 @@ void loop() {
         break;
     }
   }
+ */
+  
 }
 
 void sendGCode(String c) {
@@ -215,7 +259,10 @@ void sendGCode(String c) {
 }
 
 bool addGCode(String c) {
-  if(wgcode>=MAX_GCODES) {USB<<"Limit reached\n"; return false;}
+  if(wgcode>=MAX_GCODES) {
+    USB<<"Limit reached\n"; 
+    return false;
+  }
   gcodes[wgcode]=c; 
   wgcode++; 
   return true;
@@ -280,7 +327,6 @@ void parseGrblStatus(char* v) {
             st=pch+4;fi = strchr(st, ',');   mystrcpy(buf, st, fi);  ofsX = atof(buf);
             st=fi+1; fi = strchr(st, ',');   mystrcpy(buf, st, fi);  ofsY = atof(buf);
             st=fi+1;                                                 ofsZ = atof(st);
-            //GD_DEBUGF("Parsed WCO: %f %f %f\n", ofsX, ofsY, ofsZ);
             USB<<"Parsed WCO:"<<ofsX<<" "<<ofsY<<" "<<ofsZ<<'\n';
         }
 
